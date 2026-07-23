@@ -2189,6 +2189,32 @@ Garden Salad
     return null;
   }
 
+  // Image-extraction helpers, shared by all three import strategies below,
+  // so an imported recipe gets a real photo whenever the source page has one
+  // (via schema.org "image", microdata, or a plain Open Graph/Twitter image
+  // meta tag as a universal fallback).
+  function resolveUrl(maybeRelative, baseUrl){
+    try{ return new URL(maybeRelative, baseUrl).href; }catch(e){ return maybeRelative || null; }
+  }
+  function normalizeJsonLdImage(image, baseUrl){
+    if(!image) return null;
+    if(typeof image === "string") return resolveUrl(image, baseUrl);
+    if(Array.isArray(image)) return normalizeJsonLdImage(image[0], baseUrl);
+    if(typeof image === "object" && image.url) return resolveUrl(image.url, baseUrl);
+    return null;
+  }
+  function extractOgImage(doc, baseUrl){
+    var meta = doc.querySelector('meta[property="og:image"]') || doc.querySelector('meta[name="twitter:image"]');
+    var content = meta && meta.getAttribute("content");
+    return content ? resolveUrl(content, baseUrl) : null;
+  }
+  function tryGetOgImage(html, url){
+    try{
+      var doc = new DOMParser().parseFromString(html, "text/html");
+      return extractOgImage(doc, url);
+    }catch(e){ return null; }
+  }
+
   function extractJsonLdRecipe(html){
     var re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
     var match;
@@ -2204,7 +2230,7 @@ Garden Salad
 
   // Fallback for sites that mark up recipes with schema.org microdata
   // (itemprop attributes) instead of, or in addition to, JSON-LD.
-  function extractMicrodataRecipe(html){
+  function extractMicrodataRecipe(html, url){
     try{
       var doc = new DOMParser().parseFromString(html, "text/html");
       var scope = doc.querySelector('[itemtype*="schema.org/Recipe"]') || doc;
@@ -2225,10 +2251,16 @@ Garden Salad
       var nameEl = scope.querySelector('[itemprop="name"]') || doc.querySelector("h1");
       var name = txt(nameEl);
 
+      var imgEl = scope.querySelector('[itemprop="image"]');
+      var image = imgEl ? (imgEl.getAttribute("content") || imgEl.getAttribute("src") || txt(imgEl)) : null;
+      if(!image) image = extractOgImage(doc, url);
+      if(image) image = resolveUrl(image, url);
+
       return {
         name: name || "Imported Recipe",
         recipeIngredient: ingredientLines,
-        recipeInstructions: instructionLines
+        recipeInstructions: instructionLines,
+        image: image
       };
     }catch(e){ return null; }
   }
@@ -2255,7 +2287,8 @@ Garden Salad
         name: name || "Imported Recipe",
         ingredients: parsed.ingredients,
         instructions: parsed.instructions,
-        sourceUrl: url
+        sourceUrl: url,
+        image: extractOgImage(doc, url)
       };
     }catch(e){ return null; }
   }
@@ -2265,8 +2298,13 @@ Garden Salad
   // back to a best-effort guess.
   function extractRecipeAnyStrategy(html, url){
     var node = extractJsonLdRecipe(html);
-    if(node) return {kind:"node", node:node, method:"structured"};
-    node = extractMicrodataRecipe(html);
+    if(node){
+      // JSON-LD recipes usually include their own "image", but fall back to
+      // the page's Open Graph image if that field is missing.
+      if(!normalizeJsonLdImage(node.image, url)) node.image = tryGetOgImage(html, url);
+      return {kind:"node", node:node, method:"structured"};
+    }
+    node = extractMicrodataRecipe(html, url);
     if(node) return {kind:"node", node:node, method:"markup"};
     var guess = extractPlainTextRecipe(html, url);
     if(guess) return {kind:"guess", guess:guess, method:"guess"};
@@ -2297,6 +2335,8 @@ Garden Salad
       cats.forEach(function(c){ if(c) tags.push(String(c).toLowerCase()); });
     }
 
+    var image = normalizeJsonLdImage(node.image, sourceUrl);
+
     return {
       id: uid("r"),
       name: name,
@@ -2306,7 +2346,8 @@ Garden Salad
       tags: tags,
       ingredients: ingredients,
       instructions: instructions,
-      sourceUrl: sourceUrl
+      sourceUrl: sourceUrl,
+      image: image || undefined
     };
   }
 
@@ -2323,7 +2364,8 @@ Garden Salad
       tags: ["imported", "needs review"],
       ingredients: guess.ingredients,
       instructions: guess.instructions,
-      sourceUrl: sourceUrl
+      sourceUrl: sourceUrl,
+      image: guess.image || undefined
     };
   }
 
